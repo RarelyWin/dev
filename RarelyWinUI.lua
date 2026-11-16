@@ -2082,6 +2082,22 @@ function Library:Notify(options)
 
 end
 
+local WATERMARK_LOGO_URL = "https://raw.githubusercontent.com/RarelyWin/dev/refs/heads/main/RW.png"
+local watermarkLogoAsset = nil
+local function watermarkLogo()
+    if watermarkLogoAsset ~= nil then return watermarkLogoAsset or nil end
+    watermarkLogoAsset = false
+    pcall(function()
+        local path = CACHE_DIR .. "/RW.png"
+        if not (isfile and isfile(path)) and writefile then
+            ensureFolder(CACHE_DIR)
+            writefile(path, game:HttpGet(WATERMARK_LOGO_URL))
+        end
+        if getcustomasset and isfile and isfile(path) then watermarkLogoAsset = getcustomasset(path) end
+    end)
+    return watermarkLogoAsset or nil
+end
+
 function Library:Watermark(options)
     options=options or {}; options.Element="Watermark"
     local defaults={"FPS","BPS","TPS","PING","CPU","RAM USAGE","LOGIN"}; local criteria=options.Criteria or defaults; local enabled=options.Enabled or {}
@@ -2090,7 +2106,7 @@ function Library:Watermark(options)
         if options["Show"..name]==nil then options["Show"..name]=enabled[name] end
     end
 
-    local BAR_HEIGHT = 26
+    local BAR_HEIGHT = 30
     local TEXT_COLOR = Color3.fromRGB(226, 228, 233)
 
     local frame = create("Frame", {
@@ -2105,10 +2121,16 @@ function Library:Watermark(options)
     local barLayout = create("UIListLayout", {FillDirection = Enum.FillDirection.Horizontal, VerticalAlignment = Enum.VerticalAlignment.Center, Padding = UDim.new(0, 8), SortOrder = Enum.SortOrder.LayoutOrder})
     barLayout.Parent = frame
 
-    local logoCell = create("Frame", {Name = "Logo", BackgroundTransparency = 1, Size = UDim2.fromOffset(24, BAR_HEIGHT), LayoutOrder = 1, ZIndex = 201})
+    local logoCell = create("Frame", {Name = "Logo", BackgroundTransparency = 1, Size = UDim2.fromOffset(28, BAR_HEIGHT), LayoutOrder = 1, ZIndex = 201})
     logoCell.Parent = frame
-    local logo = label(logoCell, "RW", 13, Enum.Font.GothamBlack, Color3.fromRGB(240, 242, 247), Enum.TextXAlignment.Center)
-    logo.Size = UDim2.fromScale(1, 1); logo.ZIndex = 202
+    local logoAsset = watermarkLogo()
+    if logoAsset then
+        local logoImage = create("ImageLabel", {Name = "LogoImage", BackgroundTransparency = 1, AnchorPoint = Vector2.new(.5, .5), Position = UDim2.fromScale(.5, .5), Size = UDim2.fromOffset(26, 26), Image = logoAsset, ScaleType = Enum.ScaleType.Fit, ZIndex = 202})
+        logoImage.Parent = logoCell
+    else
+        local logo = label(logoCell, "RW", 13, Enum.Font.GothamBlack, Color3.fromRGB(240, 242, 247), Enum.TextXAlignment.Center)
+        logo.Size = UDim2.fromScale(1, 1); logo.ZIndex = 202
+    end
 
     local afterLogoDivider = create("Frame", {BackgroundColor3 = Color3.fromRGB(255, 255, 255), BackgroundTransparency = .84, BorderSizePixel = 0, Size = UDim2.fromOffset(1, 12), LayoutOrder = 2, ZIndex = 202})
     afterLogoDivider.Parent = frame
