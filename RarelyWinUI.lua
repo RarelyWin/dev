@@ -1552,6 +1552,7 @@ local function hudBackdrop(library, frame, radius, zBase)
         table.insert(layers, {Frame = layer, Pad = pad, Base = base})
     end
     local wasShown = false
+    local lastShown, lastPos, lastSize, lastFade = nil, nil, nil, nil
     connect(RunService.RenderStepped, function()
 
         local shown = frame.Parent ~= nil and not frame:GetAttribute("RW_NoGlow")
@@ -1565,6 +1566,9 @@ local function hudBackdrop(library, frame, radius, zBase)
 
         local pos, size = frame.AbsolutePosition - library.Gui.AbsolutePosition, frame.AbsoluteSize
         local fade = frame:IsA("CanvasGroup") and frame.GroupTransparency or 0
+        -- nothing changed since the last frame: writing the same values again still costs a layout pass
+        if shown == lastShown and pos == lastPos and size == lastSize and fade == lastFade then return end
+        lastShown, lastPos, lastSize, lastFade = shown, pos, size, fade
         for _, layer in ipairs(layers) do
             local p = layer.Pad
             layer.Frame.Visible = shown
@@ -2082,6 +2086,7 @@ function Library:Notify(options)
 
 end
 
+-- Logo picture: downloaded once into RarelyWin/cache and loaded like a local file. Nil -> the "RW" text is used.
 local WATERMARK_LOGO_URL = "https://raw.githubusercontent.com/RarelyWin/dev/refs/heads/main/RW.png"
 local watermarkLogoAsset = nil
 local function watermarkLogo()
@@ -2231,12 +2236,18 @@ function Library:Watermark(options)
     options.WatermarkControl = watermark
 
     local started, frameCount, fps, lastTps = os.clock(), 0, 0, 0
+    local nextText = 0
     connect(RunService.RenderStepped, function(dt)
         frameCount += 1
         if os.clock() - started >= .5 then
             fps = math.floor(frameCount / (os.clock() - started)); frameCount, started = 0, os.clock()
             lastTps = math.floor(1 / math.max(dt, .001) + .5)
         end
+        -- the texts are rebuilt 4 times a second, and not at all while the watermark is hidden
+        if not frame.Visible then return end
+        local clockNow = os.clock()
+        if clockNow < nextText then return end
+        nextText = clockNow + .25
         local ping = math.floor((LocalPlayer and LocalPlayer:GetNetworkPing() or 0) * 1000)
         local values = {
             FPS = function() return fps .. " FPS" end,
@@ -2253,16 +2264,16 @@ function Library:Watermark(options)
             if entry then
                 local text = (enabled[key] and values[key]) and values[key]() or ""
                 local visible = text ~= ""
-                entry.Cell.Visible = visible
+                if entry.Cell.Visible ~= visible then entry.Cell.Visible = visible end
                 if visible then
-                    entry.Text.Text = text
-                    entry.Icon.ImageColor3 = T.Accent
+                    if entry.Text.Text ~= text then entry.Text.Text = text end
+                    if entry.Icon.ImageColor3 ~= T.Accent then entry.Icon.ImageColor3 = T.Accent end
                 end
-                if entry.Divider then entry.Divider.Visible = visible and seenVisible end
+                if entry.Divider and entry.Divider.Visible ~= (visible and seenVisible) then entry.Divider.Visible = visible and seenVisible end
                 if visible then seenVisible = true end
             end
         end
-        afterLogoDivider.Visible = seenVisible
+        if afterLogoDivider.Visible ~= seenVisible then afterLogoDivider.Visible = seenVisible end
     end)
 
     watermark.Menu = attachHudMenu(self, frame, options)
@@ -3243,15 +3254,17 @@ function Library:_buildSettingsSection()
         end
     end)
     local lastColor = T.Accent
+    local function readProp(object, prop) return object[prop] end
+    local function writeProp(object, prop, value) object[prop] = value end
     local function paintAccent(color, animated)
         local previous = lastColor
         T.Accent = color; lastColor = color
         for object, props in pairs(accentRegistry) do
             if object.Parent and object:IsDescendantOf(self.Gui) and not excluded(object) then
                 for prop in pairs(props) do
-                    local ok, current = pcall(function() return object[prop] end)
+                    local ok, current = pcall(readProp, object, prop)
                     if ok and typeof(current) == "Color3" and current ~= color and (current == previous or (animated and onPath(current))) then
-                        pcall(function() object[prop] = color end)
+                        pcall(writeProp, object, prop, color)
                     end
                 end
             end
@@ -3261,7 +3274,7 @@ function Library:_buildSettingsSection()
     connect(RunService.Heartbeat, function()
         if accent.Mode == "Static" then return end
         local now = os.clock()
-        if now - lastPaint < 0.05 then return end
+        if now - lastPaint < (self.Visible and 0.05 or 0.1) then return end
         lastPaint = now
         local k = 0.5 - 0.5 * math.cos(now * 0.9 * accent.Speed)
         paintAccent(accent.Color1:Lerp(secondColor(), k), true)
