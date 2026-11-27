@@ -40,6 +40,7 @@ local function markAccent(object, prop)
     props[prop] = true
 end
 local connections = {}
+local openWindows = {} -- every created window, so global loops can tell whether a menu is open
 local iconCache = {}
 
 local SUB_HEIGHT, SECTION_GAP, SUB_STAGGER = 38, 3, .035
@@ -396,6 +397,7 @@ end
 function Library:CreateWindow(options)
     options = options or {}
     local self = setmetatable({}, Library)
+    table.insert(openWindows, self)
     self.Tabs, self.Keybinds, self.Flags, self.HUDRegistry = {}, {}, {}, {}
     self.ValueBinds = {}
     self.Visible = true
@@ -866,19 +868,37 @@ local function marquee(textLabel)
         textLabel.Size = UDim2.fromScale(1, 1)
         textLabel.TextTruncate = Enum.TextTruncate.None
         textLabel.TextXAlignment = Enum.TextXAlignment.Left
-        table.insert(marqueeLabels, {Holder = holder, Label = textLabel, Start = os.clock()})
+        -- the first size check is spread over half a second, so the labels never all re-measure in one frame
+        table.insert(marqueeLabels, {Holder = holder, Label = textLabel, Start = os.clock(), Next = os.clock() + math.random() * .5, Overflow = 0, TextWidth = 0})
     end)
 end
+-- The labels only exist inside the menu: nothing is done while every menu is closed. Reading TextBounds of
+-- hundreds of labels every frame was the single biggest per-frame cost of the library, so the sizes are
+-- re-read twice a second; the sliding itself still moves every frame.
+local function anyMenuOpen()
+    for _, window in ipairs(openWindows) do if window.Visible then return true end end
+    return false
+end
 RunService.RenderStepped:Connect(function()
+    if not anyMenuOpen() then return end
     local now = os.clock()
     for i = #marqueeLabels, 1, -1 do
         local m = marqueeLabels[i]
         local holder, textLabel = m.Holder, m.Label
         if not holder.Parent then
             table.remove(marqueeLabels, i)
-        elseif holder.AbsoluteSize.X > 0 and textLabel.Visible then
-            local width, textWidth = holder.AbsoluteSize.X, textLabel.TextBounds.X
-            local overflow = textWidth - width
+        else
+            if now >= m.Next then
+                m.Next = now + .5
+                local holderWidth = holder.AbsoluteSize.X
+                if holderWidth > 0 and textLabel.Visible then
+                    m.TextWidth = textLabel.TextBounds.X
+                    m.Overflow = m.TextWidth - holderWidth
+                else
+                    m.Overflow = 0
+                end
+            end
+            local textWidth, overflow = m.TextWidth, m.Overflow
             if overflow > 1 then
                 if textLabel.Size.X.Scale ~= 0 or textLabel.Size.X.Offset ~= math.ceil(textWidth) then
                     textLabel.Size = UDim2.new(0, math.ceil(textWidth), 1, 0)
