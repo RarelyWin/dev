@@ -228,6 +228,32 @@ local function connect(signal, callback)
     return connection
 end
 
+-- One RenderStepped connection for the whole library. Every per-frame job is called from this single
+-- connection instead of having its own: the executor pays a fixed cost for each connection it fires
+-- (about 0.04 ms a frame each - measured), and the library used to have 65 of them.
+local frameTasks, frameConnection = {}, nil
+local function onFrame(callback)
+    local entry = {Callback = callback, Alive = true}
+    table.insert(frameTasks, entry)
+    if not frameConnection then
+        frameConnection = RunService.RenderStepped:Connect(function(dt)
+            local i = 1
+            while i <= #frameTasks do
+                local job = frameTasks[i]
+                if job.Alive then
+                    local ok, err = pcall(job.Callback, dt)
+                    if not ok and not job.Warned then job.Warned = true; warn("[RarelyWinUI] frame job: " .. tostring(err)) end
+                    i += 1
+                else
+                    table.remove(frameTasks, i)
+                end
+            end
+        end)
+        table.insert(connections, frameConnection)
+    end
+    return {Disconnect = function() entry.Alive = false end}
+end
+
 local function tween(object, time, props, style, direction)
     local info = TweenInfo.new(time or .18, style or Enum.EasingStyle.Quart, direction or Enum.EasingDirection.Out)
     local animation = TweenService:Create(object, info, props)
@@ -879,7 +905,7 @@ local function anyMenuOpen()
     for _, window in ipairs(openWindows) do if window.Visible then return true end end
     return false
 end
-RunService.RenderStepped:Connect(function()
+onFrame(function()
     if not anyMenuOpen() then return end
     local now = os.clock()
     for i = #marqueeLabels, 1, -1 do
@@ -1559,6 +1585,10 @@ function Library:Label(card, options) return createLabel(card, options) end
 
 local GLOW_LAYERS, GLOW_STEP, GLOW_BASE, GLOW_FADE = 7, 2, .76, .03
 local GLOW_COLOR = Color3.fromRGB(6, 6, 9)
+-- Glow Type (UI Settings): "Default" = all 7 layers, visibility checked every frame; "Optimized" = 2 layers
+-- (darker, so the shadow looks about the same) and the visibility walk 10 times a second; "Off" = nothing.
+local GLOW_TYPES = {["Default Glow"] = "Default", ["Optimized Glow"] = "Optimized", Off = "Off"}
+local OPTIMIZED_GLOW = {[2] = .6, [5] = .8} -- layer index -> its transparency in Optimized mode
 
 local function hudBackdrop(library, frame, radius, zBase)
     zBase = zBase or frame.ZIndex
@@ -1572,30 +1602,53 @@ local function hudBackdrop(library, frame, radius, zBase)
         table.insert(layers, {Frame = layer, Pad = pad, Base = base})
     end
     local wasShown = false
-    local lastShown, lastPos, lastSize, lastFade = nil, nil, nil, nil
-    connect(RunService.RenderStepped, function()
-
-        local shown = frame.Parent ~= nil and not frame:GetAttribute("RW_NoGlow")
-        local node = frame
-        while shown and node and node ~= library.Gui do
-            if node:IsA("GuiObject") and not node.Visible then shown = false end
-            node = node.Parent
+    local lastShown, lastPos, lastSize, lastFade, lastMode = nil, nil, nil, nil, nil
+    local entry = {Dirty = true}
+    library._backdrops = library._backdrops or {}
+    table.insert(library._backdrops, entry)
+    local lastWalk, walkedShown = 0, false
+    onFrame(function()
+        local mode = library.GlowType or "Default"
+        if mode == "Off" then
+            if lastMode ~= "Off" then
+                for _, layer in ipairs(layers) do layer.Frame.Visible = false end
+                lastMode, lastShown, wasShown = "Off", false, false
+            end
+            return
         end
-        if not shown and not wasShown then return end
+
+        -- is the element on screen: walk up its parents (every frame in Default, 10 times a second in Optimized)
+        local now = os.clock()
+        local shown
+        if mode == "Optimized" and not entry.Dirty and now - lastWalk < .1 then
+            shown = walkedShown
+        else
+            shown = frame.Parent ~= nil and not frame:GetAttribute("RW_NoGlow")
+            local node = frame
+            while shown and node and node ~= library.Gui do
+                if node:IsA("GuiObject") and not node.Visible then shown = false end
+                node = node.Parent
+            end
+            lastWalk, walkedShown = now, shown
+        end
+        if not shown and not wasShown and not entry.Dirty then return end
         wasShown = shown
 
         local pos, size = frame.AbsolutePosition - library.Gui.AbsolutePosition, frame.AbsoluteSize
         local fade = frame:IsA("CanvasGroup") and frame.GroupTransparency or 0
         -- nothing changed since the last frame: writing the same values again still costs a layout pass
-        if shown == lastShown and pos == lastPos and size == lastSize and fade == lastFade then return end
-        lastShown, lastPos, lastSize, lastFade = shown, pos, size, fade
-        for _, layer in ipairs(layers) do
-            local p = layer.Pad
-            layer.Frame.Visible = shown
-            if shown then
+        if not entry.Dirty and mode == lastMode and shown == lastShown and pos == lastPos and size == lastSize and fade == lastFade then return end
+        entry.Dirty = false
+        lastMode, lastShown, lastPos, lastSize, lastFade = mode, shown, pos, size, fade
+        for i, layer in ipairs(layers) do
+            local base = mode == "Default" and layer.Base or OPTIMIZED_GLOW[i]
+            local visible = shown and base ~= nil
+            if layer.Frame.Visible ~= visible then layer.Frame.Visible = visible end
+            if visible then
+                local p = layer.Pad
                 layer.Frame.Position = UDim2.fromOffset(pos.X - p, pos.Y - p)
                 layer.Frame.Size = UDim2.fromOffset(size.X + p * 2, size.Y + p * 2)
-                layer.Frame.BackgroundTransparency = layer.Base + (1 - layer.Base) * fade
+                layer.Frame.BackgroundTransparency = base + (1 - base) * fade
             end
         end
     end)
@@ -2257,7 +2310,7 @@ function Library:Watermark(options)
 
     local started, frameCount, fps, lastTps = os.clock(), 0, 0, 0
     local nextText = 0
-    connect(RunService.RenderStepped, function(dt)
+    onFrame(function(dt)
         frameCount += 1
         if os.clock() - started >= .5 then
             fps = math.floor(frameCount / (os.clock() - started)); frameCount, started = 0, os.clock()
@@ -2378,7 +2431,7 @@ function Library:KeyStrokes(options)
         if name then light(name, false) end
     end)
 
-    connect(RunService.RenderStepped, function()
+    onFrame(function()
         if not frame.Visible then return end
         local now = os.clock()
         for name, list in pairs(clicks) do
@@ -2841,7 +2894,7 @@ function Library:ModuleList(options)
         NumberSequenceKeypoint.new(0.6, 1), NumberSequenceKeypoint.new(1, 1),
     })})
     shineGradient.Parent = shine
-    connect(RunService.RenderStepped, function()
+    onFrame(function()
         local enabled = self.AccentShineEnabled ~= false and frame.Visible and bar.Size.Y.Offset > 0
         shine.Visible = enabled
         if enabled then
@@ -3335,6 +3388,10 @@ function Library:_buildSettingsSection()
         Callback=function(v) if self.CursorAssets and self.CursorAssets[v] then cursorState.Style=v end end})
     self:Slider(ui,{Name="Cursor Size",Min=16,Max=96,Default=32,Step=1,Suffix=" px",Callback=function(v) cursorState.Size=v end})
     self:Toggle(ui,{Name="Cursor In Game",Default=false,Bindable=false,Callback=function(v) cursorState.InGame=v end})
+    self:Dropdown(ui,{Name="Glow Type",Values={"Default Glow","Optimized Glow","Off"},Default="Default Glow",Callback=function(value)
+        self.GlowType=GLOW_TYPES[value] or "Default"
+        for _,entry in ipairs(self._backdrops or {}) do entry.Dirty=true end
+    end})
     self:Dropdown(ui,{Name="UI Font",Values=self:ListFonts(),Default="Default",OnOpen=function(control) control:SetValues(self:ListFonts()) end,Callback=function(value) self:SetFont(value) end})
     self.ToggleSoundName = "Default"
     self.AccentShineEnabled = true
@@ -3359,6 +3416,7 @@ end
 function Library:Destroy()
     for _, connection in ipairs(connections) do pcall(function() connection:Disconnect() end) end
     table.clear(connections)
+    table.clear(frameTasks); frameConnection = nil
     pcall(function() RunService:UnbindFromRenderStep("RW_MenuMouse") end)
     if self.Gui then self.Gui:Destroy() end
 end
@@ -3462,7 +3520,7 @@ function Library:SetupCursor()
     image.Parent = holder
     pcall(function() image.ResampleMode = Enum.ResamplerMode.Pixelated end)
     self.CursorState = {Enabled = false, InGame = false, Size = 32, Style = nil, Image = image, Gui = holder}
-    connect(RunService.RenderStepped, function() pcall(self._cursorStep, self) end)
+    onFrame(function() pcall(self._cursorStep, self) end)
     return self.CursorState
 end
 
@@ -3520,7 +3578,7 @@ function Library:Preview(parent, options)
     local preview = {Frame = frame}
     local model, track = nil, nil
     local angle = 0
-    connect(RunService.RenderStepped, function(dt)
+    onFrame(function(dt)
         if not (model and model.Parent) then return end
         angle += dt * 0.5
         local center, size = model:GetBoundingBox()
