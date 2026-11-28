@@ -2715,7 +2715,7 @@ function Library:SpeedGraph(options)
     function graph:Destroy() alive = false; frame:Destroy() end
 
     local last = 0
-    connect(RunService.Heartbeat, function()
+    onFrame(function()
         if not alive or not graph.Getter or not frame.Visible then return end
         local now = os.clock()
         if now - last < 1 / rate then return end
@@ -3344,7 +3344,7 @@ function Library:_buildSettingsSection()
         end
     end
     local lastPaint = 0
-    connect(RunService.Heartbeat, function()
+    onFrame(function()
         if accent.Mode == "Static" then return end
         local now = os.clock()
         if now - lastPaint < (self.Visible and 0.05 or 0.1) then return end
